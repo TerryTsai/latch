@@ -1,0 +1,77 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>latch</title>
+<style>
+:root{
+  color-scheme:light dark;
+  --bg:#fafafa;--fg:#111;
+  --latched:#c0d8c4;     /* sage — gate is closed, default */
+  --unlatched:#e8c896;   /* apricot — gate is open, session active */
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0e0e0e;--fg:#eee;
+    --latched:#4d6b53;
+    --unlatched:#8a6a45;
+  }
+}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:16px/1.4 ui-monospace,monospace}
+main{display:grid;place-items:center;height:100%;padding:1rem;box-sizing:border-box}
+button{font:inherit;font-size:1.125rem;width:12rem;padding:1rem 0;background:var(--latched);color:var(--fg);border:0;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background .2s}
+button.on{background:var(--unlatched)}
+button:disabled{opacity:.4;cursor:default}
+button:active:not(:disabled){opacity:.85}
+p{margin:1.25em 0 0;font-size:.875rem;opacity:.6;min-height:1em;text-align:center}
+</style>
+<main><div>
+  <button id=b disabled>unlatch</button>
+  <p id=m></p>
+</div></main>
+<script>
+const b=document.getElementById('b'),m=document.getElementById('m');
+let unlatched=false;
+const dec=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/').padEnd(s.length+(4-s.length%4)%4,'=')),c=>c.charCodeAt(0));
+const enc=x=>btoa(String.fromCharCode(...new Uint8Array(x))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+
+fetch('/verify').then(r=>{if(r.status===200){unlatched=true;b.textContent='latch';b.classList.add('on')}}).finally(()=>b.disabled=false);
+
+async function login(){
+  const r=await fetch('/begin'+location.search,{method:'POST'});
+  if(!r.ok)throw new Error(await r.text());
+  const {mode,options}=await r.json();
+  const pk=options.publicKey;
+  pk.challenge=dec(pk.challenge);
+  if(mode==='register'){pk.user.id=dec(pk.user.id);pk.excludeCredentials?.forEach(c=>c.id=dec(c.id))}
+  else{pk.allowCredentials?.forEach(c=>c.id=dec(c.id))}
+  const cred=await navigator.credentials[mode==='register'?'create':'get']({publicKey:pk});
+  const res=mode==='register'?{
+    clientDataJSON:enc(cred.response.clientDataJSON),
+    attestationObject:enc(cred.response.attestationObject),
+  }:{
+    clientDataJSON:enc(cred.response.clientDataJSON),
+    authenticatorData:enc(cred.response.authenticatorData),
+    signature:enc(cred.response.signature),
+    userHandle:cred.response.userHandle?enc(cred.response.userHandle):null,
+  };
+  const body={id:cred.id,rawId:enc(cred.rawId),type:cred.type,response:res};
+  const c=await fetch('/complete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  if(!c.ok)throw new Error(await c.text());
+  const {next}=await c.json();
+  location.href=next;
+}
+
+async function logout(){
+  const r=await fetch('/logout',{method:'POST'});
+  if(!r.ok)throw new Error(await r.text());
+  location.reload();
+}
+
+async function go(){
+  b.disabled=true;m.textContent='';
+  try{
+    await (unlatched?logout():login());
+  }catch(e){m.textContent=e.message||String(e);b.disabled=false}
+}
+b.addEventListener('click',go);
+</script>

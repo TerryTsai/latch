@@ -1,0 +1,24 @@
+[package]
+name        = "latch"
+version     = "0.1.0"
+edition     = "2021"
+authors     = ["Terry Tsai"]
+license     = "MIT"
+description = "Single-user passkey-based auth for personal infrastructure"
+repository  = "https://github.com/TerryTsai/latch"
+readme      = "README.md"
+keywords    = ["webauthn", "passkey", "auth", "homelab", "self-hosted"]
+categories  = ["authentication", "web-programming::http-server"]
+
+[dependencies]
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+tiny_http   = "0.12"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+
+[profile.release]
+opt-level     = "z"
+lto           = "fat"
+codegen-units = 1
+strip         = "symbols"
+panic         = "abort"
