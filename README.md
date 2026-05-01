@@ -8,6 +8,8 @@ A WebAuthn-only auth server for one user.
 
 You tap a passkey to log in; whatever sits in front of your services hits `/verify` to find out whether you did. There are no users to manage, no password fallback, and no recovery flow — if you lose every registered passkey, you delete the JSON file of public keys and register again. The whole program is under 500 lines of Rust, small enough to audit in an afternoon if that matters to you.
 
+<p align="center"><img src="docs/screenshot-dark.png" alt="latch sign-in page" width="240"></p>
+
 ## Table of Contents
 
 - [Install](#install)
@@ -40,6 +42,8 @@ LATCH_CREDS_PATH       (optional)  default creds.json
 ```
 
 Run the binary. `latch --check` validates the env without starting; `latch --version` prints the version.
+
+On first visit, with no credentials yet on disk, the page is in register mode — your tap enrolls a passkey. From then on the same page is a login.
 
 Endpoints:
 

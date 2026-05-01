@@ -1,40 +1,141 @@
 <!doctype html>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>latch</title>
 <style>
-:root{
-  color-scheme:light dark;
-  --bg:#fafafa;--fg:#111;
-  --latched:#c0d8c4;     /* sage — gate is closed, default */
-  --unlatched:#e8c896;   /* apricot — gate is open, session active */
+:root {
+  color-scheme: light dark;
+  --bg-top: #fbfbfb;
+  --bg-bot: #eeeeee;
+  --fg: #1c1c1e;
+  --soft: rgba(60, 60, 67, 0.6);
+  --glass: rgba(255, 255, 255, 0.7);
+  --hairline-top: rgba(255, 255, 255, 0.6);
+  --hairline-bot: rgba(0, 0, 0, 0.10);
+  --shadow:
+    0 8px 24px -8px rgba(0, 0, 0, 0.10),
+    0 2px 4px -1px rgba(0, 0, 0, 0.05);
+  --shadow-active:
+    0 4px 10px -4px rgba(0, 0, 0, 0.10);
 }
-@media (prefers-color-scheme:dark){
-  :root{
-    --bg:#0e0e0e;--fg:#eee;
-    --latched:#4d6b53;
-    --unlatched:#8a6a45;
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-top: #0c0c0e;
+    --bg-bot: #000;
+    --fg: #f5f5f7;
+    --soft: rgba(235, 235, 245, 0.55);
+    --glass: rgba(255, 255, 255, 0.08);
+    --hairline-top: rgba(255, 255, 255, 0.22);
+    --hairline-bot: rgba(255, 255, 255, 0.14);
+    --shadow:
+      0 12px 32px -10px rgba(0, 0, 0, 0.5);
+    --shadow-active:
+      0 6px 14px -4px rgba(0, 0, 0, 0.4);
   }
 }
-html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:16px/1.4 ui-monospace,monospace}
-main{display:grid;place-items:center;height:100%;padding:1rem;box-sizing:border-box}
-button{font:inherit;font-size:1.125rem;width:12rem;padding:1rem 0;background:var(--latched);color:var(--fg);border:0;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:background .2s}
-button.on{background:var(--unlatched)}
-button:disabled{opacity:.4;cursor:default}
-button:active:not(:disabled){opacity:.85}
-p{margin:1.25em 0 0;font-size:.875rem;opacity:.6;min-height:1em;text-align:center}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100dvh;
+}
+
+body {
+  background: linear-gradient(180deg, var(--bg-top), var(--bg-bot));
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  display: grid;
+  place-items: center;
+  padding: env(safe-area-inset-top) 1.5rem env(safe-area-inset-bottom);
+}
+
+main {
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transform: translateY(8px);
+  animation: settle 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards;
+}
+
+button {
+  font-family: inherit;
+  font-size: 0.9375rem;
+  font-weight: 300;
+  width: 12rem;
+  padding: 1rem 0;
+  background-color: var(--glass);
+  -webkit-backdrop-filter: blur(28px) saturate(1.4);
+          backdrop-filter: blur(28px) saturate(1.4);
+  color: var(--fg);
+  border: 1px solid var(--hairline-top);
+  border-bottom-color: var(--hairline-bot);
+  border-radius: 16px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: var(--shadow);
+  transition:
+    transform  200ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity    200ms ease;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button:not(:disabled):active {
+  transform: scale(0.97);
+  box-shadow: var(--shadow-active);
+}
+
+p {
+  display: none;
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 400;
+  color: var(--soft);
+  text-align: center;
+}
+
+p:not(:empty) {
+  display: block;
+  margin-top: 0.75rem;
+}
+
+@keyframes settle {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  main { animation: none; opacity: 1; transform: none; }
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
 </style>
-<main><div>
-  <button id=b disabled>unlatch</button>
+
+<main>
+  <button id=b disabled>sign in</button>
   <p id=m></p>
-</div></main>
+</main>
+
 <script>
 const b=document.getElementById('b'),m=document.getElementById('m');
-let unlatched=false;
-const dec=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/').padEnd(s.length+(4-s.length%4)%4,'=')),c=>c.charCodeAt(0));
+let signedIn=false;
+const dec=x=>Uint8Array.from(atob(x.replace(/-/g,'+').replace(/_/g,'/').padEnd(x.length+(4-x.length%4)%4,'=')),c=>c.charCodeAt(0));
 const enc=x=>btoa(String.fromCharCode(...new Uint8Array(x))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 
-fetch('/verify').then(r=>{if(r.status===200){unlatched=true;b.textContent='latch';b.classList.add('on')}}).finally(()=>b.disabled=false);
+fetch('/verify').then(r=>{
+  if(r.status===200){
+    signedIn=true;
+    b.textContent='sign out';
+  }
+}).finally(()=>b.disabled=false);
 
 async function login(){
   const r=await fetch('/begin'+location.search,{method:'POST'});
@@ -70,7 +171,7 @@ async function logout(){
 async function go(){
   b.disabled=true;m.textContent='';
   try{
-    await (unlatched?logout():login());
+    await (signedIn?logout():login());
   }catch(e){m.textContent=e.message||String(e);b.disabled=false}
 }
 b.addEventListener('click',go);
