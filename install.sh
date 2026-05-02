@@ -67,8 +67,9 @@ fi
 
 ARCH=$(uname -m)
 case "$ARCH" in
-    x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
-    aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+    # Static musl binaries — run on any glibc or musl Linux of the same arch.
+    x86_64)  TARGET="x86_64-unknown-linux-musl" ;;
+    aarch64) TARGET="aarch64-unknown-linux-musl" ;;
     *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
 esac
 
