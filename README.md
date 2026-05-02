@@ -6,7 +6,7 @@
 
 A WebAuthn-only auth server for one user.
 
-You tap a passkey to log in; whatever sits in front of your services hits `/verify` to find out whether you did. There are no users to manage, no password fallback, and no recovery flow — if you lose every registered passkey, you delete the JSON file of public keys and register again. The whole program is under 500 lines of Rust, small enough to audit in an afternoon if that matters to you.
+You tap a passkey to log in; whatever sits in front of your services hits `/verify` to find out whether you did. There are no users to manage, no password fallback, and no recovery flow — if you lose every registered passkey, you delete the JSON file of public keys and register again. The whole program is small enough to audit in an afternoon, and the published binary is a single static file with no system dependencies.
 
 <p align="center"><img src="docs/screenshot-dark.png" alt="latch sign-in page" width="240"></p>
 
@@ -59,6 +59,8 @@ To recover from losing every registered credential, delete the JSON file at `LAT
 
 ## Footprint
 
+**5.7 MB** static binary, statically linked against musl libc with vendored OpenSSL. No `libc.so`, no `libssl.so`, no shared library dependencies of any kind. Drops onto any x86_64 Linux — glibc, musl/Alpine, distroless, scratch container — without a runtime.
+
 Idle at **3.6 MiB RSS**, **0% CPU**, **~12 ms** cold start.
 
 Under sustained synthetic load (100,000 sequential `/verify` checks at 200 concurrent connections), it holds **~3,200 requests per second** on a single core and RSS peaks around **12 MiB** — orders of magnitude more headroom than a single-user homelab will ever use.
@@ -72,7 +74,15 @@ git clone https://github.com/TerryTsai/latch && cd latch
 cargo build --release
 ```
 
-Rust 1.65+. ~1.2 MB stripped.
+Rust 1.65+. The default build dynamically links system OpenSSL — produces a 1.2 MB binary that runs on the host. For a fully static binary with vendored OpenSSL (matching the published releases), add the musl target and the `vendored` feature:
+
+```
+rustup target add x86_64-unknown-linux-musl
+sudo apt install musl-tools
+cargo build --release --target x86_64-unknown-linux-musl --features vendored
+```
+
+Output: `target/x86_64-unknown-linux-musl/release/latch`, ~5.7 MB, zero shared library dependencies.
 
 ## Maintainer
 
