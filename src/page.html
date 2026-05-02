@@ -3,126 +3,88 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>latch</title>
 <style>
+@font-face {
+  font-family: 'Marcellus';
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  src: url("data:font/woff2;base64,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") format('woff2');
+}
 :root {
   color-scheme: light dark;
-  --bg-top: #fbfbfb;
-  --bg-bot: #eeeeee;
-  --fg: #1c1c1e;
-  --soft: rgba(60, 60, 67, 0.6);
-  --glass: rgba(255, 255, 255, 0.7);
-  --hairline-top: rgba(255, 255, 255, 0.6);
-  --hairline-bot: rgba(0, 0, 0, 0.10);
-  --shadow:
-    0 8px 24px -8px rgba(0, 0, 0, 0.10),
-    0 2px 4px -1px rgba(0, 0, 0, 0.05);
-  --shadow-active:
-    0 4px 10px -4px rgba(0, 0, 0, 0.10);
+  --bg: #ffffff;
+  --fg: #18181b;
+  --soft: #71717a;
+  --btn-bg: #52525b;
+  --btn-fg: #fafafa;
+  --btn-bg-hover: #3f3f46;
+  --mark: #6366f1;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg-top: #0c0c0e;
-    --bg-bot: #000;
-    --fg: #f5f5f7;
-    --soft: rgba(235, 235, 245, 0.55);
-    --glass: rgba(255, 255, 255, 0.08);
-    --hairline-top: rgba(255, 255, 255, 0.22);
-    --hairline-bot: rgba(255, 255, 255, 0.14);
-    --shadow:
-      0 12px 32px -10px rgba(0, 0, 0, 0.5);
-    --shadow-active:
-      0 6px 14px -4px rgba(0, 0, 0, 0.4);
+    --bg: #09090b;
+    --fg: #f4f4f5;
+    --soft: #a1a1aa;
+    --btn-bg: #a1a1aa;
+    --btn-fg: #18181b;
+    --btn-bg-hover: #d4d4d8;
+    --mark: #818cf8;
   }
 }
-
 * { box-sizing: border-box; }
-
-html, body {
-  margin: 0;
-  height: 100dvh;
-}
-
+html, body { margin: 0; height: 100dvh; }
 body {
-  background: linear-gradient(180deg, var(--bg-top), var(--bg-bot));
+  background: var(--bg);
   color: var(--fg);
   font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2rem;
   padding: env(safe-area-inset-top) 1.5rem env(safe-area-inset-bottom);
 }
-
-main {
-  display: grid;
-  place-items: center;
-  opacity: 0;
-  transform: translateY(8px);
-  animation: settle 0.7s cubic-bezier(0.16, 1, 0.3, 1) 0.1s forwards;
+.brand { display: flex; align-items: center; gap: 0.75rem; }
+.brand svg { flex-shrink: 0; color: var(--mark); }
+.brand-text {
+  font-family: 'Marcellus', serif;
+  font-size: 1.625rem;
+  font-weight: 400;
+  letter-spacing: 0.005em;
+  line-height: 1;
 }
-
 button {
   font-family: inherit;
-  font-size: 0.9375rem;
-  font-weight: 300;
-  width: 12rem;
-  padding: 1rem 0;
-  background-color: var(--glass);
-  -webkit-backdrop-filter: blur(28px) saturate(1.4);
-          backdrop-filter: blur(28px) saturate(1.4);
-  color: var(--fg);
-  border: 1px solid var(--hairline-top);
-  border-bottom-color: var(--hairline-bot);
-  border-radius: 16px;
+  font-size: 0.875rem;
+  font-weight: 400;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  min-width: 12rem;
+  padding: 0.625rem 1.5rem;
+  border: 0;
+  border-radius: 0.5rem;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  box-shadow: var(--shadow);
-  transition:
-    transform  200ms cubic-bezier(0.16, 1, 0.3, 1),
-    box-shadow 200ms cubic-bezier(0.16, 1, 0.3, 1),
-    opacity    200ms ease;
+  transition: background-color 150ms ease, opacity 200ms ease;
 }
-
-button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-button:not(:disabled):active {
-  transform: scale(0.97);
-  box-shadow: var(--shadow-active);
-}
-
-p {
-  display: none;
-  margin: 0;
-  font-size: 0.8125rem;
-  font-weight: 400;
-  color: var(--soft);
-  text-align: center;
-}
-
-p:not(:empty) {
-  display: block;
-  margin-top: 0.75rem;
-}
-
-@keyframes settle {
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  main { animation: none; opacity: 1; transform: none; }
-  *, *::before, *::after {
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-  }
-}
+button:hover:not(:disabled) { background: var(--btn-bg-hover); }
+button:disabled { opacity: 0.5; cursor: default; }
+#m { display: none; margin: 0; font-size: 0.8125rem; color: var(--soft); text-align: center; }
+#m:not(:empty) { display: block; }
 </style>
 
-<main>
-  <button id=b disabled>sign in</button>
-  <p id=m></p>
-</main>
+<div class="brand">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+    <circle cx="10" cy="10" r="8.25" stroke="currentColor" stroke-width="1.5"/>
+    <line x1="3.5" y1="10" x2="16.5" y2="10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  </svg>
+  <span class="brand-text">latch</span>
+</div>
+
+<button id=b disabled>sign in</button>
+
+<p id=m></p>
 
 <script>
 const b=document.getElementById('b'),m=document.getElementById('m');
