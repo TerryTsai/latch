@@ -330,8 +330,11 @@ WantedBy=multi-user.target
 }
 
 fn render_user_unit(bin: &Path, config: &Path, state_dir: &Path) -> String {
-    // systemd --user: no User=/Group=, and ProtectHome=true would block our
-    // state dir under $HOME. The rest of the hardening is unprivileged-safe.
+    // systemd --user runs without CAP_SETPCAP, so any directive that
+    // implicitly drops capabilities (ProtectKernel*, ProtectClock,
+    // ProtectControlGroups, etc.) fails the CAPABILITIES exec step.
+    // Stick to seccomp- and process-attribute-based hardening, which
+    // works unprivileged.
     format!(r#"[Unit]
 Description=latch — single-user passkey-based auth
 After=network.target
@@ -343,21 +346,11 @@ WorkingDirectory={state_dir}
 Restart=on-failure
 RestartSec=2
 
-# Hardening
+# Hardening (user-mode safe)
 NoNewPrivileges=true
-PrivateTmp=true
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-ProtectClock=true
-ProtectHostname=true
-RestrictNamespaces=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
@@ -439,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn user_unit_has_no_system_directives() {
+    fn user_unit_has_no_privileged_directives() {
         let u = render_user_unit(
             Path::new("/usr/local/bin/latch"),
             Path::new("/home/me/.config/latch/config.toml"),
@@ -449,6 +442,13 @@ mod tests {
         assert!(!u.contains("Group="));
         assert!(!u.contains("ProtectHome="));
         assert!(!u.contains("ProtectSystem="));
+        // These implicitly drop caps and fail in --user mode.
+        assert!(!u.contains("ProtectKernel"));
+        assert!(!u.contains("ProtectClock"));
+        assert!(!u.contains("ProtectControlGroups"));
+        assert!(!u.contains("ProtectHostname"));
+        assert!(!u.contains("PrivateDevices"));
+        assert!(u.contains("NoNewPrivileges=true"));
         assert!(u.contains("WantedBy=default.target"));
     }
 
