@@ -1,15 +1,21 @@
 // latch — single-user passkey-based auth.
 //
-// Recovery story: lose your device → SSH to host → `rm <creds-path>` → visit /
+// Recovery: lose your devices → SSH to host → `rm <creds-path>` → visit /
 // from a new device → re-register. Registration mode is auto-selected when
 // the creds file is empty. There is no recovery code, no fallback path.
+//
+// Sessions are HMAC-signed JWTs (HS256). The signing key lives at the
+// configured key path; lose it and every issued session is invalidated
+// — equivalent to forcing a fresh sign-in.
 
 mod config;
+mod jwt;
 
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;
 use std::thread;
@@ -27,17 +33,17 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 // `handle` turns that into a 400 with the message as body.
 type Resp = Result<ResponseBox, String>;
 
-struct Session    { expires: Instant }
-struct Challenge  { kind: ChKind, expires: Instant, next: String }
-enum   ChKind     { Register(PasskeyRegistration), Login(PasskeyAuthentication) }
+struct Challenge { kind: ChKind, expires: Instant, next: String }
+enum   ChKind    { Register(PasskeyRegistration), Login(PasskeyAuthentication) }
 
 struct Latch {
     config:     Config,
     wa:         Webauthn,
     user_id:    Uuid,
+    key:        Vec<u8>,                          // HS256 signing key
     creds:      Mutex<Vec<Passkey>>,
-    sessions:   Mutex<HashMap<String, Session>>,
     challenges: Mutex<HashMap<String, Challenge>>,
+    revoked:    Mutex<HashMap<String, Instant>>,  // jti → cleanup deadline
 }
 
 fn main() {
@@ -70,13 +76,15 @@ fn main() {
 
     let listen = cfg.listen.clone();
     let creds  = load_creds(&cfg.creds_path);
+    let key    = load_or_create_key(&cfg.key_path);
     let latch: &'static Latch = Box::leak(Box::new(Latch {
         config: cfg,
         wa,
         user_id,
+        key,
         creds:      Mutex::new(creds),
-        sessions:   Mutex::new(HashMap::new()),
         challenges: Mutex::new(HashMap::new()),
+        revoked:    Mutex::new(HashMap::new()),
     }));
 
     thread::spawn(move || sweeper(latch));
@@ -111,6 +119,7 @@ fn print_help() {
     println!("  LATCH_COOKIE_DOMAIN e.g. example.com");
     println!("  LATCH_LISTEN        default 127.0.0.1:8080");
     println!("  LATCH_CREDS_PATH    default creds.json");
+    println!("  LATCH_KEY_PATH      default key (HS256 signing key, generated on first run)");
 }
 
 fn handle(mut req: Request, latch: &Latch) {
@@ -169,22 +178,30 @@ fn complete(req: &mut Request, latch: &Latch) -> Resp {
         ChKind::Login(state)    => finish_login(latch, &body, state)?,
     }
 
-    let session = random_token();
-    latch.sessions.lock().unwrap().insert(
-        session.clone(),
-        Session { expires: Instant::now() + config::SESSION_TTL },
-    );
+    let now = jwt::unix_now();
+    let claims = jwt::Claims {
+        sub: config::USER_NAME.into(),
+        iat: now,
+        exp: now + config::SESSION_TTL.as_secs(),
+        jti: random_token(),
+    };
+    let token = jwt::issue(&claims, &latch.key).map_err(|e| format!("issue: {e}"))?;
+
     let body = serde_json::json!({ "next": ch.next });
     Ok(Response::from_string(body.to_string())
         .with_header(ct("application/json"))
-        .with_header(set_session_cookie(&latch.config, &session))
+        .with_header(set_session_cookie(&latch.config, &token))
         .with_header(clear_challenge_cookie())
         .boxed())
 }
 
 fn logout(req: &Request, latch: &Latch) -> Resp {
-    if let Some(t) = cookie(req, config::COOKIE_SESSION) {
-        latch.sessions.lock().unwrap().remove(&t);
+    if let Some(token) = cookie(req, config::COOKIE_SESSION) {
+        if let Ok(claims) = jwt::verify(&token, &latch.key) {
+            let until = Instant::now()
+                + std::time::Duration::from_secs(claims.exp.saturating_sub(jwt::unix_now()));
+            latch.revoked.lock().unwrap().insert(claims.jti, until);
+        }
     }
     Ok(Response::empty(204).with_header(clear_session_cookie(&latch.config)).boxed())
 }
@@ -229,20 +246,16 @@ fn finish_login(latch: &Latch, body: &str, state: PasskeyAuthentication) -> Resu
 }
 
 fn session_valid(latch: &Latch, token: &str) -> bool {
-    let mut sessions = latch.sessions.lock().unwrap();
-    match sessions.get(token) {
-        Some(s) if s.expires > Instant::now() => true,
-        Some(_) => { sessions.remove(token); false }
-        None    => false,
-    }
+    let Ok(claims) = jwt::verify(token, &latch.key) else { return false };
+    !latch.revoked.lock().unwrap().contains_key(&claims.jti)
 }
 
 fn sweeper(latch: &Latch) -> ! {
     loop {
         thread::sleep(config::SWEEP_INTERVAL);
         let now = Instant::now();
-        latch.sessions  .lock().unwrap().retain(|_, s| s.expires > now);
         latch.challenges.lock().unwrap().retain(|_, c| c.expires > now);
+        latch.revoked   .lock().unwrap().retain(|_, until| *until > now);
     }
 }
 
@@ -262,6 +275,23 @@ fn save_creds(creds: &[Passkey], path: &str) -> std::io::Result<()> {
     f.write_all(&serde_json::to_vec_pretty(creds)?)?;
     f.sync_all()?;
     fs::rename(tmp, path)
+}
+
+fn load_or_create_key(path: &str) -> Vec<u8> {
+    if let Ok(bytes) = fs::read(path) {
+        if bytes.len() == 32 { return bytes; }
+        eprintln!("warning: {path} has unexpected size; regenerating");
+    }
+    let mut buf = [0u8; 32];
+    fs::File::open("/dev/urandom").expect("open /dev/urandom")
+        .read_exact(&mut buf).expect("read /dev/urandom");
+    let p = Path::new(path);
+    let tmp = p.with_extension("tmp");
+    fs::write(&tmp, buf).expect("write key tmp");
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).expect("chmod key");
+    fs::rename(&tmp, p).expect("rename key");
+    eprintln!("generated new signing key at {path}");
+    buf.to_vec()
 }
 
 // --- http ------------------------------------------------------------------
@@ -330,36 +360,7 @@ fn random_token() -> String {
     let mut buf = [0u8; 32];
     fs::File::open("/dev/urandom").expect("open /dev/urandom")
         .read_exact(&mut buf).expect("read /dev/urandom");
-    b64u(&buf)
-}
-
-fn b64u(bytes: &[u8]) -> String {
-    const C: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity((bytes.len() * 4 + 2) / 3);
-    let mut i = 0;
-    while i + 3 <= bytes.len() {
-        let n = (bytes[i] as u32) << 16 | (bytes[i+1] as u32) << 8 | bytes[i+2] as u32;
-        out.push(C[((n >> 18) & 63) as usize] as char);
-        out.push(C[((n >> 12) & 63) as usize] as char);
-        out.push(C[((n >>  6) & 63) as usize] as char);
-        out.push(C[( n        & 63) as usize] as char);
-        i += 3;
-    }
-    match bytes.len() - i {
-        1 => {
-            let n = (bytes[i] as u32) << 16;
-            out.push(C[((n >> 18) & 63) as usize] as char);
-            out.push(C[((n >> 12) & 63) as usize] as char);
-        }
-        2 => {
-            let n = (bytes[i] as u32) << 16 | (bytes[i+1] as u32) << 8;
-            out.push(C[((n >> 18) & 63) as usize] as char);
-            out.push(C[((n >> 12) & 63) as usize] as char);
-            out.push(C[((n >>  6) & 63) as usize] as char);
-        }
-        _ => {}
-    }
-    out
+    jwt::b64u_encode(&buf)
 }
 
 // --- tests -----------------------------------------------------------------
@@ -375,25 +376,7 @@ mod tests {
             cookie_domain: "example.org".into(),
             listen:        "127.0.0.1:0".into(),
             creds_path:    "/tmp/test-creds.json".into(),
-        }
-    }
-
-    #[test]
-    fn b64u_known_vectors() {
-        assert_eq!(b64u(b""),       "");
-        assert_eq!(b64u(b"f"),      "Zg");
-        assert_eq!(b64u(b"fo"),     "Zm8");
-        assert_eq!(b64u(b"foo"),    "Zm9v");
-        assert_eq!(b64u(b"foob"),   "Zm9vYg");
-        assert_eq!(b64u(b"fooba"),  "Zm9vYmE");
-        assert_eq!(b64u(b"foobar"), "Zm9vYmFy");
-    }
-
-    #[test]
-    fn b64u_no_padding() {
-        for n in 1..16 {
-            let bytes = vec![0u8; n];
-            assert!(!b64u(&bytes).contains('='), "len {n}");
+            key_path:      "/tmp/test-key".into(),
         }
     }
 

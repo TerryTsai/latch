@@ -25,6 +25,7 @@ pub struct Config {
     pub cookie_domain: String,
     pub listen:        String,
     pub creds_path:    String,
+    pub key_path:      String,
 }
 
 impl Config {
@@ -35,6 +36,7 @@ impl Config {
             cookie_domain: var("LATCH_COOKIE_DOMAIN", "example.com"),
             listen:        var("LATCH_LISTEN",        "127.0.0.1:8080"),
             creds_path:    var("LATCH_CREDS_PATH",    "creds.json"),
+            key_path:      var("LATCH_KEY_PATH",      "key"),
         }
     }
 
@@ -57,6 +59,7 @@ impl Config {
         eprintln!("  RP_ORIGIN     = {}", self.rp_origin);
         eprintln!("  COOKIE_DOMAIN = {}", self.cookie_domain);
         eprintln!("  CREDS_PATH    = {}", self.creds_path);
+        eprintln!("  KEY_PATH      = {}", self.key_path);
     }
 
     pub fn validate_next(&self, next: &str) -> String {
