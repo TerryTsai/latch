@@ -160,7 +160,14 @@ fn print_help() {
     println!("  --version, -v   print version and exit");
     println!("  --help,    -h   this message");
     println!();
+    println!("MODES:");
+    println!("  Auto-detected from euid. Run as root for system-wide install,");
+    println!("  otherwise everything lives under your home directory.");
+    println!();
+    println!("    system  /etc/latch/config.toml, /var/lib/latch, system systemd unit");
+    println!("    user    ~/.config/latch/config.toml, ~/.local/state/latch, --user systemd unit");
+    println!();
     println!("CONFIG:");
     println!("  --config <path> overrides the default search.");
-    println!("  Search order: --config, $LATCH_CONFIG, ./latch.toml, /etc/latch/config.toml");
+    println!("  Search order: --config, $LATCH_CONFIG, ./latch.toml, mode-default.");
 }

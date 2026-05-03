@@ -40,7 +40,9 @@ pub fn run(cfg: Config) -> Result<(), String> {
         .build()
         .map_err(|e| format!("webauthn: {e}"))?;
 
-    let listen  = cfg.listen.clone();
+    let listen = cfg.listen.clone();
+    std::fs::create_dir_all(&cfg.state_dir)
+        .map_err(|e| format!("mkdir {}: {e}", cfg.state_dir.display()))?;
     let creds   = state::load_creds(&cfg.creds_path);
     let key     = state::load_or_create_key(&cfg.key_path);
     let revoked = state::load_revoked(&cfg.revoked_path);

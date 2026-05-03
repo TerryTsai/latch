@@ -20,9 +20,55 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 pub const COOKIE_SESSION:   &str = "latch_s";
 pub const COOKIE_CHALLENGE: &str = "latch_c";
 
-pub const DEFAULT_LISTEN:    &str = "127.0.0.1:8080";
-pub const DEFAULT_STATE_DIR: &str = "/var/lib/latch";
-pub const DEFAULT_CONFIG:    &str = "/etc/latch/config.toml";
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
+
+// --- mode ------------------------------------------------------------------
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Mode { System, User }
+
+impl Mode {
+    pub fn detect() -> Self {
+        // SAFETY: getuid() has no preconditions.
+        if unsafe { getuid() } == 0 { Mode::System } else { Mode::User }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self { Mode::System => "system", Mode::User => "user" }
+    }
+}
+
+extern "C" { fn getuid() -> u32; }
+
+pub fn default_config_path(mode: Mode) -> PathBuf {
+    match mode {
+        Mode::System => PathBuf::from("/etc/latch/config.toml"),
+        Mode::User   => xdg_config_home().join("latch/config.toml"),
+    }
+}
+
+pub fn default_state_dir(mode: Mode) -> PathBuf {
+    match mode {
+        Mode::System => PathBuf::from("/var/lib/latch"),
+        Mode::User   => xdg_state_home().join("latch"),
+    }
+}
+
+pub fn xdg_config_home() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home_dir().join(".config"))
+}
+
+pub fn xdg_state_home() -> PathBuf {
+    env::var_os("XDG_STATE_HOME").map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home_dir().join(".local/state"))
+}
+
+pub fn home_dir() -> PathBuf {
+    env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+}
 
 // --- config file -----------------------------------------------------------
 
@@ -70,7 +116,7 @@ impl Config {
         let listen = cf.listen.unwrap_or_else(|| DEFAULT_LISTEN.into());
         let state_dir = cf.state_dir
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR));
+            .unwrap_or_else(|| default_state_dir(Mode::detect()));
 
         let creds_path   = state_dir.join("creds.json");
         let key_path     = state_dir.join("key");
@@ -119,9 +165,14 @@ pub fn find_config(explicit: Option<&Path>) -> Result<PathBuf, String> {
     }
     let local = PathBuf::from("./latch.toml");
     if local.exists() { return Ok(local); }
-    let etc = PathBuf::from(DEFAULT_CONFIG);
-    if etc.exists() { return Ok(etc); }
-    Err(format!("no config found. Run `latch init` to create {DEFAULT_CONFIG}"))
+
+    let mode = Mode::detect();
+    let default = default_config_path(mode);
+    if default.exists() { return Ok(default); }
+
+    Err(format!(
+        "no config found. Run `latch init` to create {}", default.display(),
+    ))
 }
 
 pub fn derive_cookie_domain(rp_id: &str) -> Result<String, String> {
@@ -179,5 +230,13 @@ mod tests {
         let c = cfg();
         assert_eq!(c.validate_next("https://app.example.org/dash"), "https://app.example.org/dash");
         assert_eq!(c.validate_next("https://example.org/"), "https://example.org/");
+    }
+
+    #[test]
+    fn default_paths_differ_by_mode() {
+        assert_eq!(default_config_path(Mode::System), PathBuf::from("/etc/latch/config.toml"));
+        assert!(default_config_path(Mode::User).ends_with("latch/config.toml"));
+        assert_eq!(default_state_dir(Mode::System), PathBuf::from("/var/lib/latch"));
+        assert!(default_state_dir(Mode::User).ends_with("latch"));
     }
 }

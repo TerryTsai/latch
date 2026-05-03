@@ -11,13 +11,14 @@ use std::process::Command;
 
 use openssl::hash::{Hasher, MessageDigest};
 
+use crate::config::Mode;
 use crate::lifecycle;
 
 const REPO: &str = "TerryTsai/latch";
 const TARGET: &str = "x86_64-unknown-linux-musl";
 
 pub fn run() -> Result<(), String> {
-    require_root_for_update()?;
+    require_writable_binary()?;
     let current = env!("CARGO_PKG_VERSION");
     let latest = fetch_latest_tag()?;
     let latest_ver = latest.trim_start_matches('v');
@@ -74,9 +75,12 @@ pub fn run() -> Result<(), String> {
 
     let _ = fs::remove_dir_all(&tmp);
 
-    if lifecycle::is_unit_active() {
+    let mode = Mode::detect();
+    if lifecycle::is_unit_active(mode) {
         eprintln!("restarting systemd service...");
-        Command::new("systemctl").args(["restart", "latch.service"])
+        let mut cmd = Command::new("systemctl");
+        if mode == Mode::User { cmd.arg("--user"); }
+        cmd.args(["restart", "latch.service"])
             .status()
             .map_err(|e| format!("restart: {e}"))?;
     } else {
@@ -86,15 +90,18 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn require_root_for_update() -> Result<(), String> {
+fn require_writable_binary() -> Result<(), String> {
     let bin = std::env::current_exe().map_err(|e| e.to_string())?;
     let euid = unsafe { getuid() };
     if euid == 0 { return Ok(()); }
     let metadata = fs::metadata(&bin).map_err(|e| format!("stat: {e}"))?;
-    let writable = metadata.permissions().mode() & 0o002 != 0
-        || std::os::unix::fs::MetadataExt::uid(&metadata) == euid;
-    if !writable {
-        return Err(format!("can't write {} as non-root (try sudo)", bin.display()));
+    let owned = std::os::unix::fs::MetadataExt::uid(&metadata) == euid;
+    let world_writable = metadata.permissions().mode() & 0o002 != 0;
+    if !owned && !world_writable {
+        return Err(format!(
+            "can't replace {} as the current user.\nrun:\n    sudo latch update",
+            bin.display(),
+        ));
     }
     Ok(())
 }

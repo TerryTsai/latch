@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
 # install.sh — drops the latch binary into place. After this, run `latch init`.
 #
+# Default: installs to ~/.local/bin (no sudo). Run with sudo for a system-wide
+# install at /usr/local/bin.
+#
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/TerryTsai/latch/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/TerryTsai/latch/main/install.sh | sudo bash
 #
 # Env overrides:
 #   LATCH_REPO    owner/repo on GitHub (default: TerryTsai/latch)
-#   LATCH_PREFIX  install prefix (default: /usr/local/bin)
+#   LATCH_PREFIX  install prefix (default: ~/.local/bin or /usr/local/bin)
 
 set -euo pipefail
 
 REPO="${LATCH_REPO:-TerryTsai/latch}"
-PREFIX="${LATCH_PREFIX:-/usr/local/bin}"
+
+if [[ $EUID -eq 0 ]]; then
+    PREFIX="${LATCH_PREFIX:-/usr/local/bin}"
+    MODE="system"
+else
+    PREFIX="${LATCH_PREFIX:-$HOME/.local/bin}"
+    MODE="user"
+    mkdir -p "$PREFIX"
+fi
 
 ARCH=$(uname -m)
 case "$ARCH" in
@@ -19,11 +31,6 @@ case "$ARCH" in
     aarch64) TARGET="aarch64-unknown-linux-musl" ;;
     *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
 esac
-
-if [[ $EUID -ne 0 ]]; then
-    echo "elevating with sudo..."
-    exec sudo -E bash "$0" "$@"
-fi
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
@@ -54,7 +61,30 @@ tar xzf "$TMPDIR/latch.tar.gz" -C "$TMPDIR"
 install -m755 "$TMPDIR/latch" "$PREFIX/latch"
 
 echo
-echo "latch $TAG installed at $PREFIX/latch"
+echo "latch $TAG installed at $PREFIX/latch ($MODE mode)"
+
+# PATH hint — only if user-mode and prefix isn't already on PATH.
+if [[ "$MODE" == "user" ]]; then
+    case ":$PATH:" in
+        *":$PREFIX:"*) ;;
+        *)
+            echo
+            echo "$PREFIX is not on your PATH. Add this to your shell rc (~/.bashrc, ~/.zshrc):"
+            echo "    export PATH=\"$PREFIX:\$PATH\""
+            ;;
+    esac
+fi
+
+echo
 echo "next:"
-echo "  sudo latch init     # create config"
-echo "  sudo latch start    # install systemd unit and start"
+if [[ "$MODE" == "system" ]]; then
+    echo "    sudo latch init     # write /etc/latch/config.toml"
+    echo "    sudo latch start    # install systemd unit and start"
+    echo
+    echo "for a per-user install instead, re-run without sudo."
+else
+    echo "    latch init     # write ~/.config/latch/config.toml"
+    echo "    latch start    # install --user systemd unit and start"
+    echo
+    echo "for a system-wide install instead, re-run with sudo."
+fi
