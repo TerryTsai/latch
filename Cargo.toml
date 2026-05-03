@@ -1,6 +1,6 @@
 [package]
 name        = "latch"
-version     = "0.1.4"
+version     = "0.2.0"
 edition     = "2021"
 authors     = ["Terry Tsai"]
 license     = "MIT"
@@ -15,6 +15,7 @@ webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"]
 tiny_http   = "0.12"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
+toml        = { version = "0.8", default-features = false, features = ["parse"] }
 # Listed so we can opt into vendoring OpenSSL via the `vendored` feature.
 # Default build links system OpenSSL dynamically; release CI enables
 # `vendored` together with the musl target for a fully static binary.
