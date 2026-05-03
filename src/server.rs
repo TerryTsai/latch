@@ -69,7 +69,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
 fn handle(mut req: Request, latch: &Latch) {
     let path = req.url().split('?').next().unwrap_or("");
     let res: Resp = match (req.method(), path) {
-        (Method::Get,  "/")         => index(),
+        (Method::Get,  "/")         => index(latch),
         (Method::Get,  "/verify")   => verify(&req, latch),
         (Method::Post, "/begin")    => begin(&req, latch),
         (Method::Post, "/complete") => complete(&mut req, latch),
@@ -81,8 +81,10 @@ fn handle(mut req: Request, latch: &Latch) {
 
 // --- handlers --------------------------------------------------------------
 
-fn index() -> Resp {
-    Ok(Response::from_string(PAGE).with_header(ct("text/html; charset=utf-8")).boxed())
+fn index(latch: &Latch) -> Resp {
+    let label = if latch.creds.lock().unwrap().is_empty() { "register passkey" } else { "sign in" };
+    let html = PAGE.replace("{{label}}", label);
+    Ok(Response::from_string(html).with_header(ct("text/html; charset=utf-8")).boxed())
 }
 
 fn verify(req: &Request, latch: &Latch) -> Resp {
