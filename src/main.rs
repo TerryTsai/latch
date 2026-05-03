@@ -13,11 +13,12 @@ mod update;
 use std::env;
 use std::path::PathBuf;
 
+use crate::lifecycle::InitOpts;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug)]
 enum Cmd {
-    Init      { rp_id: Option<String>, path: Option<PathBuf>, print: bool, yes: bool },
+    Init      (InitOpts),
     Run       { config: Option<PathBuf> },
     Start     { config: Option<PathBuf> },
     Stop,
@@ -40,7 +41,7 @@ fn main() {
     };
 
     let r = match cmd {
-        Cmd::Init { rp_id, path, print, yes } => lifecycle::init(rp_id, path, print, yes),
+        Cmd::Init      (opts)     => lifecycle::init(opts),
         Cmd::Run       { config } => run_server(config),
         Cmd::Start     { config } => lifecycle::start(config.as_deref()),
         Cmd::Stop                 => lifecycle::stop(),
@@ -90,19 +91,20 @@ fn parse() -> Result<Cmd, String> {
 }
 
 fn parse_init(args: &[String]) -> Result<Cmd, String> {
-    let mut rp_id = None;
-    let mut path  = None;
-    let mut print = false;
-    let mut yes   = false;
+    let mut o = InitOpts::default();
     for a in args {
-        if let Some(v) = a.strip_prefix("--rp-id=") { rp_id = Some(v.into()); }
-        else if let Some(v) = a.strip_prefix("--path=") { path = Some(PathBuf::from(v)); }
-        else if a == "--print" { print = true; }
-        else if a == "--yes" || a == "-y" { yes = true; }
+        if      let Some(v) = a.strip_prefix("--rp-id=")         { o.rp_id         = Some(v.into()); }
+        else if let Some(v) = a.strip_prefix("--rp-origin=")     { o.rp_origin     = Some(v.into()); }
+        else if let Some(v) = a.strip_prefix("--cookie-domain=") { o.cookie_domain = Some(v.into()); }
+        else if let Some(v) = a.strip_prefix("--listen=")        { o.listen        = Some(v.into()); }
+        else if let Some(v) = a.strip_prefix("--state-dir=")     { o.state_dir     = Some(PathBuf::from(v)); }
+        else if let Some(v) = a.strip_prefix("--path=")          { o.path          = Some(PathBuf::from(v)); }
+        else if a == "--print"           { o.print = true; }
+        else if a == "--yes" || a == "-y" { o.yes  = true; }
         else if a == "--help" { return Err(init_help()); }
         else { return Err(format!("init: unknown flag `{a}`")); }
     }
-    Ok(Cmd::Init { rp_id, path, print, yes })
+    Ok(Cmd::Init(o))
 }
 
 fn parse_with_config(args: &[String], name: &str) -> Result<Option<PathBuf>, String> {
@@ -138,7 +140,8 @@ fn no_args(args: &[String], name: &str) -> Result<(), String> {
 }
 
 fn init_help() -> String {
-    "usage: latch init [--rp-id=HOST] [--path=PATH] [--print] [--yes]".into()
+    "usage: latch init [--rp-id=HOST] [--rp-origin=URL] [--cookie-domain=DOMAIN] \
+     [--listen=ADDR] [--state-dir=PATH] [--path=FILE] [--print] [--yes]".into()
 }
 
 fn print_help() {
@@ -168,6 +171,9 @@ fn print_help() {
     println!("    user    ~/.config/latch/config.toml, ~/.local/state/latch, --user systemd unit");
     println!();
     println!("CONFIG:");
-    println!("  --config <path> overrides the default search.");
+    println!("  TOML file is canonical; env vars override individual fields.");
+    println!("  Env: LATCH_RP_ID, LATCH_RP_ORIGIN, LATCH_COOKIE_DOMAIN,");
+    println!("       LATCH_LISTEN, LATCH_STATE_DIR, LATCH_CONFIG (file path).");
     println!("  Search order: --config, $LATCH_CONFIG, ./latch.toml, mode-default.");
+    println!("  With LATCH_RP_ID set, no file is required (container use case).");
 }

@@ -64,7 +64,7 @@ To recover from losing every registered credential, delete the JSON file at `<st
 
 ## Configuration
 
-System mode: `/etc/latch/config.toml`. User mode: `~/.config/latch/config.toml`.
+The TOML file is the canonical schema. Env vars override individual fields at run time, and `latch init` flags map 1:1 to fields when generating the file. System mode default: `/etc/latch/config.toml`. User mode default: `~/.config/latch/config.toml`.
 
 ```toml
 # REQUIRED. Hostname where latch is reachable.
@@ -80,12 +80,16 @@ rp_id = "latch.example.com"
 
 `rp_origin` defaults to `https://${rp_id}`. `cookie_domain` defaults to `rp_id` with the leading label stripped (so `latch.example.com` → `example.com`). `state_dir` holds three files latch manages: `creds.json` (registered public keys), `key` (HS256 signing key, mode 0600), and `revoked.json` (logout denylist).
 
-Config search order (first match wins):
+**Non-interactive setup:** `latch init` accepts every field as a flag — `--rp-id`, `--rp-origin`, `--cookie-domain`, `--listen`, `--state-dir` — combine with `--yes` to skip the confirmation prompt.
+
+**Env vars** with the same names as the TOML keys: `LATCH_RP_ID`, `LATCH_RP_ORIGIN`, `LATCH_COOKIE_DOMAIN`, `LATCH_LISTEN`, `LATCH_STATE_DIR`. Setting any overrides the file value. With `LATCH_RP_ID` set, no file is required at all — `latch run` synthesizes its config from env (the container case).
+
+Search order for the TOML file (first match wins):
 
 1. `--config <path>` flag
 2. `$LATCH_CONFIG` env var
 3. `./latch.toml` (current directory)
-4. mode-default path (`/etc/latch/config.toml` or `~/.config/latch/config.toml`)
+4. mode-default path
 
 ## Footprint
 

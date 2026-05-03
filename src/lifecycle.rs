@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::{self, Config, DEFAULT_LISTEN, Mode};
+use crate::config::{self, Config, ConfigSource, DEFAULT_LISTEN, Mode};
 
 const UNIT_FILE: &str = "latch.service";
 const SYSTEM_UNIT_PATH: &str = "/etc/systemd/system/latch.service";
@@ -16,11 +16,23 @@ const SYSTEM_USER: &str = "latch";
 
 // --- init ------------------------------------------------------------------
 
-pub fn init(rp_id: Option<String>, path: Option<PathBuf>, print: bool, yes: bool) -> Result<(), String> {
-    let mode = Mode::detect();
-    let target = path.unwrap_or_else(|| config::default_config_path(mode));
+#[derive(Default)]
+pub struct InitOpts {
+    pub rp_id:         Option<String>,
+    pub rp_origin:     Option<String>,
+    pub cookie_domain: Option<String>,
+    pub listen:        Option<String>,
+    pub state_dir:     Option<PathBuf>,
+    pub path:          Option<PathBuf>,
+    pub print:         bool,
+    pub yes:           bool,
+}
 
-    let rp_id = match rp_id {
+pub fn init(opts: InitOpts) -> Result<(), String> {
+    let mode = Mode::detect();
+    let target = opts.path.unwrap_or_else(|| config::default_config_path(mode));
+
+    let rp_id = match opts.rp_id {
         Some(s) => s,
         None    => prompt("Hostname (e.g. latch.example.com): ")?,
     };
@@ -30,25 +42,32 @@ pub fn init(rp_id: Option<String>, path: Option<PathBuf>, print: bool, yes: bool
         return Err("rp_id can't be a placeholder".into());
     }
 
-    let rp_origin = format!("https://{rp_id}");
-    let cookie_domain = config::derive_cookie_domain(&rp_id)?;
-    let state_dir = config::default_state_dir(mode);
+    let derived_origin    = format!("https://{rp_id}");
+    let derived_domain    = config::derive_cookie_domain(&rp_id)?;
+    let default_state_dir = config::default_state_dir(mode);
 
-    let content = render_config(&rp_id, &rp_origin, &cookie_domain, &state_dir);
+    let content = render_config(
+        &rp_id,
+        opts.rp_origin.as_deref(), &derived_origin,
+        opts.cookie_domain.as_deref(), &derived_domain,
+        opts.listen.as_deref(),
+        opts.state_dir.as_deref(), &default_state_dir,
+    );
 
-    if print {
+    if opts.print {
         print!("{content}");
         return Ok(());
     }
 
-    if !yes {
+    if !opts.yes {
         eprintln!();
         eprintln!("  mode          = {}", mode.label());
         eprintln!("  rp_id         = {rp_id}");
-        eprintln!("  rp_origin     = {rp_origin}   (derived)");
-        eprintln!("  cookie_domain = {cookie_domain}   (derived)");
-        eprintln!("  listen        = {DEFAULT_LISTEN}   (default)");
-        eprintln!("  state_dir     = {}   (default)", state_dir.display());
+        show_field("rp_origin",     opts.rp_origin.as_deref(),     &derived_origin);
+        show_field("cookie_domain", opts.cookie_domain.as_deref(), &derived_domain);
+        show_field("listen",        opts.listen.as_deref(),        DEFAULT_LISTEN);
+        show_field("state_dir",     opts.state_dir.as_deref().map(|p| p.display().to_string()).as_deref(),
+                                    &default_state_dir.display().to_string());
         eprintln!();
         let answer = prompt(&format!("Write to {}? [Y/n] ", target.display()))?;
         if !answer.is_empty() && !answer.eq_ignore_ascii_case("y") {
@@ -70,21 +89,43 @@ pub fn init(rp_id: Option<String>, path: Option<PathBuf>, print: bool, yes: bool
     Ok(())
 }
 
-fn render_config(rp_id: &str, rp_origin: &str, cookie_domain: &str, state_dir: &Path) -> String {
-    format!(
-        "# latch config\n\
-         # https://github.com/TerryTsai/latch\n\
-         \n\
-         # REQUIRED. Hostname where latch is publicly reachable.\n\
-         rp_id = \"{rp_id}\"\n\
-         \n\
-         # Optional overrides. Defaults shown commented.\n\
-         # rp_origin     = \"{rp_origin}\"\n\
-         # cookie_domain = \"{cookie_domain}\"\n\
-         # listen        = \"{DEFAULT_LISTEN}\"\n\
-         # state_dir     = \"{}\"\n",
-        state_dir.display(),
-    )
+fn show_field(name: &str, value: Option<&str>, default: &str) {
+    match value {
+        Some(v) => eprintln!("  {name:<13} = {v}"),
+        None    => eprintln!("  {name:<13} = {default}   (default)"),
+    }
+}
+
+// Each Optional field: when Some, written uncommented; when None, written
+// as a commented default the user can later uncomment. Same shape either
+// way so subsequent `latch init` re-runs are idempotent in spirit.
+fn render_config(
+    rp_id:               &str,
+    rp_origin:           Option<&str>, derived_origin: &str,
+    cookie_domain:       Option<&str>, derived_domain: &str,
+    listen:              Option<&str>,
+    state_dir:           Option<&Path>, default_state_dir: &Path,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# latch config\n");
+    out.push_str("# https://github.com/TerryTsai/latch\n\n");
+    out.push_str("# REQUIRED. Hostname where latch is publicly reachable.\n");
+    out.push_str(&format!("rp_id = \"{rp_id}\"\n\n"));
+    out.push_str("# Optional overrides. Defaults shown commented.\n");
+    line(&mut out, "rp_origin",     rp_origin,     derived_origin);
+    line(&mut out, "cookie_domain", cookie_domain, derived_domain);
+    line(&mut out, "listen",        listen,        DEFAULT_LISTEN);
+    let dsd = default_state_dir.display().to_string();
+    let sd  = state_dir.map(|p| p.display().to_string());
+    line(&mut out, "state_dir",     sd.as_deref(), &dsd);
+    out
+}
+
+fn line(buf: &mut String, name: &str, value: Option<&str>, default: &str) {
+    match value {
+        Some(v) => buf.push_str(&format!("{name:<13} = \"{v}\"\n")),
+        None    => buf.push_str(&format!("# {name:<13} = \"{default}\"\n")),
+    }
 }
 
 fn prompt(msg: &str) -> Result<String, String> {
@@ -260,9 +301,16 @@ fn unit_path(mode: Mode) -> PathBuf {
 }
 
 fn write_unit(mode: Mode, cfg: &Config) -> Result<(), String> {
+    let config_path = match &cfg.source {
+        ConfigSource::File(p) => p,
+        ConfigSource::Env => return Err(
+            "latch start needs a config file. Run `latch init` first, or use \
+             `latch run` directly with env vars (e.g. in a container).".into()
+        ),
+    };
     let bin = std::env::current_exe()
         .map_err(|e| format!("can't locate own binary: {e}"))?;
-    let unit = render_unit(mode, &bin, &cfg.source, &cfg.state_dir);
+    let unit = render_unit(mode, &bin, config_path, &cfg.state_dir);
     let path = unit_path(mode);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -421,14 +469,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_config_has_required_field() {
+    fn render_config_defaults_are_commented() {
         let s = render_config(
-            "a.b.com", "https://a.b.com", "b.com",
-            Path::new("/tmp/latch"),
+            "a.b.com",
+            None, "https://a.b.com",
+            None, "b.com",
+            None,
+            None, Path::new("/tmp/latch"),
         );
         assert!(s.contains("rp_id = \"a.b.com\""));
-        assert!(s.contains("# rp_origin"));
+        assert!(s.contains("# rp_origin     = \"https://a.b.com\""));
         assert!(s.contains("# state_dir     = \"/tmp/latch\""));
+    }
+
+    #[test]
+    fn render_config_explicit_overrides_uncommented() {
+        let s = render_config(
+            "a.b.com",
+            Some("https://other.b.com"), "https://a.b.com",
+            None, "b.com",
+            Some("0.0.0.0:8080"),
+            None, Path::new("/tmp/latch"),
+        );
+        assert!(s.contains("rp_origin     = \"https://other.b.com\""));
+        assert!(s.contains("listen        = \"0.0.0.0:8080\""));
+        assert!(s.contains("# cookie_domain"));  // not overridden
     }
 
     #[test]

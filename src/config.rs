@@ -70,15 +70,39 @@ pub fn home_dir() -> PathBuf {
     env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
-// --- config file -----------------------------------------------------------
+// --- config schema ---------------------------------------------------------
 
-#[derive(Deserialize)]
+// Every field is Option so the same struct represents a parsed TOML file,
+// an env-only layer, or the merged result. Resolve() validates rp_id is
+// present at the end.
+#[derive(Default, Deserialize)]
 pub struct ConfigFile {
-    pub rp_id:         String,
+    pub rp_id:         Option<String>,
     pub rp_origin:     Option<String>,
     pub cookie_domain: Option<String>,
     pub listen:        Option<String>,
     pub state_dir:     Option<String>,
+}
+
+impl ConfigFile {
+    pub fn from_env() -> Self {
+        Self {
+            rp_id:         env::var("LATCH_RP_ID").ok(),
+            rp_origin:     env::var("LATCH_RP_ORIGIN").ok(),
+            cookie_domain: env::var("LATCH_COOKIE_DOMAIN").ok(),
+            listen:        env::var("LATCH_LISTEN").ok(),
+            state_dir:     env::var("LATCH_STATE_DIR").ok(),
+        }
+    }
+
+    // Right-hand wins on each field where it's Some.
+    pub fn merge(&mut self, other: ConfigFile) {
+        if other.rp_id.is_some()         { self.rp_id         = other.rp_id; }
+        if other.rp_origin.is_some()     { self.rp_origin     = other.rp_origin; }
+        if other.cookie_domain.is_some() { self.cookie_domain = other.cookie_domain; }
+        if other.listen.is_some()        { self.listen        = other.listen; }
+        if other.state_dir.is_some()     { self.state_dir     = other.state_dir; }
+    }
 }
 
 pub struct Config {
@@ -90,23 +114,52 @@ pub struct Config {
     pub creds_path:    PathBuf,
     pub key_path:      PathBuf,
     pub revoked_path:  PathBuf,
-    pub source:        PathBuf,
+    pub source:        ConfigSource,
+}
+
+pub enum ConfigSource {
+    File(PathBuf),
+    Env,
+}
+
+impl ConfigSource {
+    fn display(&self) -> String {
+        match self {
+            ConfigSource::File(p) => p.display().to_string(),
+            ConfigSource::Env     => "(env)".into(),
+        }
+    }
 }
 
 impl Config {
+    // Load order: TOML file (if found) ← merged with ← env vars.
+    // If no file is found but LATCH_RP_ID is set, run from env alone.
     pub fn load(explicit: Option<&Path>) -> Result<Self, String> {
-        let path = find_config(explicit)?;
-        let raw = fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        let cf: ConfigFile = toml::from_str(&raw)
-            .map_err(|e| format!("parse {}: {e}", path.display()))?;
-        Self::resolve(cf, path)
+        let env_layer = ConfigFile::from_env();
+
+        let (mut cf, source) = match find_config(explicit) {
+            Ok(path) => {
+                let raw = fs::read_to_string(&path)
+                    .map_err(|e| format!("read {}: {e}", path.display()))?;
+                let cf: ConfigFile = toml::from_str(&raw)
+                    .map_err(|e| format!("parse {}: {e}", path.display()))?;
+                (cf, ConfigSource::File(path))
+            }
+            Err(e) => {
+                if env_layer.rp_id.is_none() { return Err(e); }
+                (ConfigFile::default(), ConfigSource::Env)
+            }
+        };
+
+        cf.merge(env_layer);
+        Self::resolve(cf, source)
     }
 
-    pub fn resolve(cf: ConfigFile, source: PathBuf) -> Result<Self, String> {
-        let rp_id = cf.rp_id;
+    pub fn resolve(cf: ConfigFile, source: ConfigSource) -> Result<Self, String> {
+        let rp_id = cf.rp_id
+            .ok_or("rp_id is required (set in config or via LATCH_RP_ID)")?;
         if rp_id.contains("example.com") {
-            return Err("rp_id still has placeholder; edit your config file".into());
+            return Err("rp_id still has placeholder; edit your config or env".into());
         }
         let rp_origin = cf.rp_origin.unwrap_or_else(|| format!("https://{rp_id}"));
         let cookie_domain = match cf.cookie_domain {
@@ -166,12 +219,12 @@ pub fn find_config(explicit: Option<&Path>) -> Result<PathBuf, String> {
     let local = PathBuf::from("./latch.toml");
     if local.exists() { return Ok(local); }
 
-    let mode = Mode::detect();
-    let default = default_config_path(mode);
+    let default = default_config_path(Mode::detect());
     if default.exists() { return Ok(default); }
 
     Err(format!(
-        "no config found. Run `latch init` to create {}", default.display(),
+        "no config found. Run `latch init` to create {}, or set LATCH_RP_ID in env",
+        default.display(),
     ))
 }
 
@@ -199,7 +252,7 @@ mod tests {
             creds_path:    PathBuf::from("/tmp/test-latch/creds.json"),
             key_path:      PathBuf::from("/tmp/test-latch/key"),
             revoked_path:  PathBuf::from("/tmp/test-latch/revoked.json"),
-            source:        PathBuf::from("/tmp/test-latch/config.toml"),
+            source:        ConfigSource::File(PathBuf::from("/tmp/test-latch/config.toml")),
         }
     }
 
@@ -238,5 +291,41 @@ mod tests {
         assert!(default_config_path(Mode::User).ends_with("latch/config.toml"));
         assert_eq!(default_state_dir(Mode::System), PathBuf::from("/var/lib/latch"));
         assert!(default_state_dir(Mode::User).ends_with("latch"));
+    }
+
+    #[test]
+    fn merge_replaces_present_fields_only() {
+        let mut a = ConfigFile {
+            rp_id: Some("a.com".into()),
+            listen: Some("127.0.0.1:1".into()),
+            ..Default::default()
+        };
+        let b = ConfigFile {
+            rp_id: Some("b.com".into()),
+            state_dir: Some("/x".into()),
+            ..Default::default()
+        };
+        a.merge(b);
+        assert_eq!(a.rp_id.as_deref(), Some("b.com"));
+        assert_eq!(a.listen.as_deref(), Some("127.0.0.1:1"));  // unchanged
+        assert_eq!(a.state_dir.as_deref(), Some("/x"));
+    }
+
+    #[test]
+    fn resolve_requires_rp_id() {
+        let cf = ConfigFile::default();
+        assert!(Config::resolve(cf, ConfigSource::Env).is_err());
+    }
+
+    #[test]
+    fn resolve_synthesizes_from_minimum() {
+        let cf = ConfigFile {
+            rp_id: Some("latch.foo.org".into()),
+            ..Default::default()
+        };
+        let c = Config::resolve(cf, ConfigSource::Env).unwrap();
+        assert_eq!(c.rp_origin, "https://latch.foo.org");
+        assert_eq!(c.cookie_domain, "foo.org");
+        assert_eq!(c.listen, DEFAULT_LISTEN);
     }
 }
