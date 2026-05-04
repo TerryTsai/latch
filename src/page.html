@@ -120,8 +120,8 @@ async function login(){
   const body={id:cred.id,rawId:enc(cred.rawId),type:cred.type,response:res};
   const c=await fetch('/complete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
   if(!c.ok)throw new Error(await c.text());
-  const {next}=await c.json();
-  location.href=next;
+  const {return_to}=await c.json();
+  location.href=return_to;
 }
 
 async function logout(){

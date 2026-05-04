@@ -17,8 +17,8 @@ pub const SESSION_TTL:    Duration = Duration::from_secs(60 * 60 * 24 * 7);
 pub const CHALLENGE_TTL:  Duration = Duration::from_secs(60 * 5);
 pub const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
-pub const COOKIE_SESSION:   &str = "latch_s";
-pub const COOKIE_CHALLENGE: &str = "latch_c";
+pub const COOKIE_SESSION:   &str = "latch_session";
+pub const COOKIE_CHALLENGE: &str = "latch_challenge";
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
 

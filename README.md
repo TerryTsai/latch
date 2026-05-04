@@ -49,10 +49,13 @@ latch run --config <path>     # run in the foreground (for testing or non-system
 
 For user mode, surviving logout/reboot without an active session needs a one-time `sudo loginctl enable-linger $USER` — `latch start` prints the exact command after it brings the service up.
 
-The HTTP contract is a fixed five-endpoint surface that doesn't change between releases:
+The HTTP contract is a fixed surface that doesn't change between releases:
 
-- `GET /` — login page
-- `GET /verify` — 200 if session valid, 401 otherwise
+- `GET /` and `GET /login` — login page (the latter is what `/verify` redirects to)
+- `GET /verify` — forward_auth subrequest endpoint:
+  - **200** if the session cookie is valid (with `X-Forwarded-User` header)
+  - **302** to `/login?return_to=<original-url>` for unauthenticated browser requests (URL reconstructed from `X-Forwarded-Host` / `X-Forwarded-Uri`)
+  - **401** with JSON body for unauthenticated API requests (`Accept: application/json` or `X-Requested-With: XMLHttpRequest`)
 - `POST /begin` / `POST /complete` — WebAuthn ceremony
 - `POST /logout` — clears session
 

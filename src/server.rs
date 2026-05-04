@@ -1,4 +1,4 @@
-// HTTP server. Five endpoints, all the WebAuthn ceremony work, JWT issuing.
+// HTTP server. Six endpoints, all the WebAuthn ceremony work, JWT issuing.
 // Spawned by `latch run` after config is loaded.
 
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ const PAGE: &str = include_str!("page.html");
 
 type Resp = Result<ResponseBox, String>;
 
-struct Challenge { kind: ChKind, expires: Instant, next: String }
+struct Challenge { kind: ChKind, expires: Instant, return_to: String }
 enum   ChKind    { Register(PasskeyRegistration), Login(PasskeyAuthentication) }
 
 pub struct Latch {
@@ -69,7 +69,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
 fn handle(mut req: Request, latch: &Latch) {
     let path = req.url().split('?').next().unwrap_or("");
     let res: Resp = match (req.method(), path) {
-        (Method::Get,  "/")         => index(latch),
+        (Method::Get,  "/") | (Method::Get, "/login") => index(latch),
         (Method::Get,  "/verify")   => verify(&req, latch),
         (Method::Post, "/begin")    => begin(&req, latch),
         (Method::Post, "/complete") => complete(&mut req, latch),
@@ -87,26 +87,52 @@ fn index(latch: &Latch) -> Resp {
     Ok(Response::from_string(html).with_header(ct("text/html; charset=utf-8")).boxed())
 }
 
+// Three-way response per the forward_auth contract:
+//   authed              → 200 + X-Forwarded-User
+//   unauthed + browser  → 302 to /login?return_to=<original URL>
+//   unauthed + API      → 401 + JSON body
 fn verify(req: &Request, latch: &Latch) -> Resp {
-    let ok = cookie(req, config::COOKIE_SESSION)
-        .is_some_and(|t| session_valid(latch, &t));
-    Ok(Response::empty(if ok { 200 } else { 401 }).boxed())
+    let claims = cookie(req, config::COOKIE_SESSION)
+        .as_deref()
+        .and_then(|t| jwt::verify(t, &latch.key).ok())
+        .filter(|c| !latch.revoked.lock().unwrap().contains_key(&c.jti));
+
+    if let Some(c) = claims {
+        return Ok(Response::empty(200)
+            .with_header(hdr("X-Forwarded-User", &c.sub))
+            .boxed());
+    }
+
+    if is_api_request(req) {
+        return Ok(Response::from_string(r#"{"error":"unauthenticated"}"#)
+            .with_status_code(401)
+            .with_header(ct("application/json"))
+            .boxed());
+    }
+
+    let return_to = build_return_to(req, &latch.config);
+    let location = format!(
+        "https://{}/login?return_to={}",
+        latch.config.rp_id,
+        url_encode(&return_to),
+    );
+    Ok(Response::empty(302).with_header(hdr("Location", &location)).boxed())
 }
 
 fn begin(req: &Request, latch: &Latch) -> Resp {
-    let next = latch.config.validate_next(&query_param(req.url(), "next"));
+    let return_to = latch.config.validate_next(&query_param(req.url(), "return_to"));
     let is_first = latch.creds.lock().unwrap().is_empty();
     if is_first {
         let (ccr, state) = latch.wa.start_passkey_registration(
             latch.user_id, config::USER_NAME, config::USER_DISPLAY, None,
         ).map_err(|e| format!("register-begin: {e}"))?;
-        Ok(issue_challenge(latch, "register", ChKind::Register(state), &ccr, next))
+        Ok(issue_challenge(latch, "register", ChKind::Register(state), &ccr, return_to))
     } else {
         let creds = latch.creds.lock().unwrap();
         let (rcr, state) = latch.wa.start_passkey_authentication(&creds)
             .map_err(|e| format!("login-begin: {e}"))?;
         drop(creds);
-        Ok(issue_challenge(latch, "login", ChKind::Login(state), &rcr, next))
+        Ok(issue_challenge(latch, "login", ChKind::Login(state), &rcr, return_to))
     }
 }
 
@@ -133,7 +159,7 @@ fn complete(req: &mut Request, latch: &Latch) -> Resp {
     };
     let token = jwt::issue(&claims, &latch.key).map_err(|e| format!("issue: {e}"))?;
 
-    let body = serde_json::json!({ "next": ch.next });
+    let body = serde_json::json!({ "return_to": ch.return_to });
     Ok(Response::from_string(body.to_string())
         .with_header(ct("application/json"))
         .with_header(set_session_cookie(&latch.config, &token))
@@ -157,12 +183,12 @@ fn logout(req: &Request, latch: &Latch) -> Resp {
 // --- ceremony --------------------------------------------------------------
 
 fn issue_challenge<T: serde::Serialize>(
-    latch: &Latch, mode: &str, kind: ChKind, options: &T, next: String,
+    latch: &Latch, mode: &str, kind: ChKind, options: &T, return_to: String,
 ) -> ResponseBox {
     let token = random_token();
     latch.challenges.lock().unwrap().insert(
         token.clone(),
-        Challenge { kind, expires: Instant::now() + config::CHALLENGE_TTL, next },
+        Challenge { kind, expires: Instant::now() + config::CHALLENGE_TTL, return_to },
     );
     let body = serde_json::json!({ "mode": mode, "options": options });
     Response::from_string(body.to_string())
@@ -193,11 +219,6 @@ fn finish_login(latch: &Latch, body: &str, st: PasskeyAuthentication) -> Result<
     Ok(())
 }
 
-fn session_valid(latch: &Latch, token: &str) -> bool {
-    let Ok(claims) = jwt::verify(token, &latch.key) else { return false };
-    !latch.revoked.lock().unwrap().contains_key(&claims.jti)
-}
-
 fn sweeper(latch: &Latch) -> ! {
     loop {
         thread::sleep(config::SWEEP_INTERVAL);
@@ -225,6 +246,42 @@ fn cookie(req: &Request, name: &str) -> Option<String> {
         .split(';')
         .map(str::trim)
         .find_map(|p| p.strip_prefix(&prefix).map(String::from))
+}
+
+fn header_value(req: &Request, name: &str) -> Option<String> {
+    req.headers().iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str().to_string())
+}
+
+fn is_api_request(req: &Request) -> bool {
+    if header_value(req, "X-Requested-With")
+        .is_some_and(|v| v.eq_ignore_ascii_case("XMLHttpRequest"))
+    { return true; }
+    let accept = header_value(req, "Accept").unwrap_or_default();
+    accept.contains("application/json") && !accept.contains("text/html")
+}
+
+// Reconstruct the URL the user was trying to reach from the X-Forwarded-*
+// headers Caddy sends on a forward_auth subrequest. Hardcode https because
+// cloudflared terminates TLS at the edge and forwards http inside the tunnel.
+fn build_return_to(req: &Request, cfg: &Config) -> String {
+    let host = header_value(req, "X-Forwarded-Host").unwrap_or_else(|| cfg.rp_id.clone());
+    let uri  = header_value(req, "X-Forwarded-Uri").unwrap_or_else(|| "/".into());
+    format!("https://{host}{uri}")
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 fn set_session_cookie(cfg: &Config, value: &str) -> Header {
@@ -277,4 +334,16 @@ fn random_token() -> String {
     std::fs::File::open("/dev/urandom").expect("open /dev/urandom")
         .read_exact(&mut buf).expect("read /dev/urandom");
     jwt::b64u_encode(&buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_encode_basic() {
+        assert_eq!(url_encode("hello"), "hello");
+        assert_eq!(url_encode("https://temp.terrytsai.dev/x?y=1"),
+                   "https%3A%2F%2Ftemp.terrytsai.dev%2Fx%3Fy%3D1");
+    }
 }
