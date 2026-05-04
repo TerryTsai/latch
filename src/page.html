@@ -92,7 +92,7 @@ let signedIn=false;
 const dec=x=>Uint8Array.from(atob(x.replace(/-/g,'+').replace(/_/g,'/').padEnd(x.length+(4-x.length%4)%4,'=')),c=>c.charCodeAt(0));
 const enc=x=>btoa(String.fromCharCode(...new Uint8Array(x))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 
-fetch('/verify').then(r=>{
+fetch('/verify',{headers:{Accept:'application/json'}}).then(r=>{
   if(r.status===200){
     signedIn=true;
     b.textContent='sign out';
