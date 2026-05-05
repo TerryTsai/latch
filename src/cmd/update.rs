@@ -11,13 +11,14 @@ use std::process::Command;
 
 use openssl::hash::{Hasher, MessageDigest};
 
+use crate::cmd::service;
 use crate::config::Mode;
-use crate::lifecycle;
+use crate::output::{Error, Result};
 
 const REPO: &str = "TerryTsai/latch";
 const TARGET: &str = "x86_64-unknown-linux-musl";
 
-pub fn run() -> Result<(), String> {
+pub fn run() -> Result<()> {
     require_writable_binary()?;
     let current = env!("CARGO_PKG_VERSION");
     let latest = fetch_latest_tag()?;
@@ -42,7 +43,7 @@ pub fn run() -> Result<(), String> {
         .to_lowercase();
     let actual = sha256_hex(&tarball)?;
     if expected != actual {
-        return Err(format!("sha256 mismatch: expected {expected}, got {actual}"));
+        return Err(Error::fail(format!("sha256 mismatch: expected {expected}, got {actual}")));
     }
     eprintln!("sha256 verified");
 
@@ -76,7 +77,7 @@ pub fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&tmp);
 
     let mode = Mode::detect();
-    if lifecycle::is_unit_active(mode) {
+    if service::is_unit_active(mode) {
         eprintln!("restarting systemd service...");
         let mut cmd = Command::new("systemctl");
         if mode == Mode::User { cmd.arg("--user"); }
@@ -90,7 +91,7 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn require_writable_binary() -> Result<(), String> {
+fn require_writable_binary() -> Result<()> {
     let bin = std::env::current_exe().map_err(|e| e.to_string())?;
     let euid = unsafe { getuid() };
     if euid == 0 { return Ok(()); }
@@ -98,15 +99,15 @@ fn require_writable_binary() -> Result<(), String> {
     let owned = std::os::unix::fs::MetadataExt::uid(&metadata) == euid;
     let world_writable = metadata.permissions().mode() & 0o002 != 0;
     if !owned && !world_writable {
-        return Err(format!(
+        return Err(Error::fail(format!(
             "can't replace {} as the current user.\nrun:\n    sudo latch update",
             bin.display(),
-        ));
+        )));
     }
     Ok(())
 }
 
-fn fetch_latest_tag() -> Result<String, String> {
+fn fetch_latest_tag() -> std::result::Result<String, String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let body = curl_text(&url)?;
     let tag = body
@@ -117,7 +118,7 @@ fn fetch_latest_tag() -> Result<String, String> {
     Ok(tag.to_string())
 }
 
-fn curl_bytes(url: &str) -> Result<Vec<u8>, String> {
+fn curl_bytes(url: &str) -> std::result::Result<Vec<u8>, String> {
     let out = Command::new("curl")
         .args(["-fsSL", "--proto", "=https", "--tlsv1.2"])
         .arg(url)
@@ -129,19 +130,19 @@ fn curl_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
-fn curl_text(url: &str) -> Result<String, String> {
+fn curl_text(url: &str) -> std::result::Result<String, String> {
     let bytes = curl_bytes(url)?;
     String::from_utf8(bytes).map_err(|e| format!("response not utf-8: {e}"))
 }
 
-fn sha256_hex(bytes: &[u8]) -> Result<String, String> {
+fn sha256_hex(bytes: &[u8]) -> std::result::Result<String, String> {
     let mut h = Hasher::new(MessageDigest::sha256()).map_err(|e| e.to_string())?;
     h.update(bytes).map_err(|e| e.to_string())?;
     let digest = h.finish().map_err(|e| e.to_string())?;
     Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn tempdir() -> Result<PathBuf, String> {
+fn tempdir() -> std::result::Result<PathBuf, String> {
     let base = std::env::temp_dir();
     let name = format!("latch-update-{}", std::process::id());
     let dir = base.join(name);
