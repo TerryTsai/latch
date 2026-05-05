@@ -1,7 +1,7 @@
-// Persistent state: credentials, signing key, revoked-token denylist.
+// Persistent state: passkeys, signing key, revoked-token denylist.
 //
-// All three live under the configured state_dir. Files are written atomically
-// via tmp+rename. The signing key is mode 0600.
+// All three live under the configured data_dir. Files are written
+// atomically via tmp+rename. The signing key is mode 0600.
 
 use std::collections::HashMap;
 use std::fs;
@@ -11,17 +11,17 @@ use std::path::Path;
 
 use webauthn_rs::prelude::Passkey;
 
-// --- credentials -----------------------------------------------------------
+// --- passkeys --------------------------------------------------------------
 
-pub fn load_creds(path: &Path) -> Vec<Passkey> {
+pub fn load_passkeys(path: &Path) -> Vec<Passkey> {
     fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 
-pub fn save_creds(creds: &[Passkey], path: &Path) -> std::io::Result<()> {
-    write_atomic(path, &serde_json::to_vec_pretty(creds)?)
+pub fn save_passkeys(passkeys: &[Passkey], path: &Path) -> std::io::Result<()> {
+    write_atomic(path, &serde_json::to_vec_pretty(passkeys)?)
 }
 
 // --- signing key -----------------------------------------------------------

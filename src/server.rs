@@ -3,9 +3,10 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tiny_http::{Header, Method, Request, Response, ResponseBox, Server};
 use webauthn_rs::prelude::*;
@@ -33,26 +34,27 @@ pub struct Latch {
 
 pub fn run(cfg: Config) -> Result<(), String> {
     let user_id = Uuid::parse_str(config::USER_ID).expect("USER_ID");
-    let origin  = Url::parse(&cfg.rp_origin).map_err(|e| format!("invalid rp_origin: {e}"))?;
-    let wa = WebauthnBuilder::new(&cfg.rp_id, &origin)
+    let origin  = Url::parse(&cfg.origin).map_err(|e| format!("invalid origin: {e}"))?;
+    // webauthn-rs calls this "rp_id" at its API boundary; we pass our hostname.
+    let wa = WebauthnBuilder::new(&cfg.hostname, &origin)
         .map_err(|e| format!("rp: {e}"))?
         .rp_name(config::RP_NAME)
         .build()
         .map_err(|e| format!("webauthn: {e}"))?;
 
     let listen = cfg.listen.clone();
-    std::fs::create_dir_all(&cfg.state_dir)
-        .map_err(|e| format!("mkdir {}: {e}", cfg.state_dir.display()))?;
-    let creds   = state::load_creds(&cfg.creds_path);
-    let key     = state::load_or_create_key(&cfg.key_path);
-    let revoked = state::load_revoked(&cfg.revoked_path);
+    std::fs::create_dir_all(&cfg.data_dir)
+        .map_err(|e| format!("mkdir {}: {e}", cfg.data_dir.display()))?;
+    let passkeys = state::load_passkeys(&cfg.passkeys_path);
+    let key      = state::load_or_create_key(&cfg.key_path);
+    let revoked  = state::load_revoked(&cfg.revoked_path);
 
     let latch: &'static Latch = Box::leak(Box::new(Latch {
         config: cfg,
         wa,
         user_id,
         key,
-        creds:      Mutex::new(creds),
+        creds:      Mutex::new(passkeys),
         challenges: Mutex::new(HashMap::new()),
         revoked:    Mutex::new(revoked),
     }));
@@ -60,10 +62,50 @@ pub fn run(cfg: Config) -> Result<(), String> {
     thread::spawn(move || sweeper(latch));
 
     let server = Server::http(&listen).map_err(|e| format!("listen on {listen}: {e}"))?;
-    for req in server.incoming_requests() {
-        handle(req, latch);
+    install_signal_handlers();
+
+    // Poll with a short timeout so we can react to SIGTERM/SIGINT instead
+    // of blocking forever in incoming_requests().
+    while !SHUTDOWN.load(Ordering::Relaxed) {
+        match server.recv_timeout(Duration::from_millis(250)) {
+            Ok(Some(req)) => handle(req, latch),
+            Ok(None)      => {}                           // timeout, loop and re-check
+            Err(e) => {
+                eprintln!("recv: {e}");
+                break;
+            }
+        }
     }
+    eprintln!("shutting down");
     Ok(())
+}
+
+// --- signal handling -------------------------------------------------------
+//
+// Installs handlers for SIGTERM and SIGINT that flip an atomic flag the
+// serve loop polls. No third-party crates: raw libc::sigaction with a
+// trivial async-signal-safe handler.
+
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_signal(_sig: i32) {
+    SHUTDOWN.store(true, Ordering::Relaxed);
+}
+
+fn install_signal_handlers() {
+    const SIGINT:  i32 = 2;
+    const SIGTERM: i32 = 15;
+    // SAFETY: signal() is async-signal-safe; on_signal does only an atomic store.
+    let h = on_signal as *const () as usize;
+    unsafe {
+        libc_signal(SIGINT,  h);
+        libc_signal(SIGTERM, h);
+    }
+}
+
+extern "C" {
+    #[link_name = "signal"]
+    fn libc_signal(signum: i32, handler: usize) -> usize;
 }
 
 fn handle(mut req: Request, latch: &Latch) {
@@ -113,7 +155,7 @@ fn verify(req: &Request, latch: &Latch) -> Resp {
     let return_to = build_return_to(req, &latch.config);
     let location = format!(
         "https://{}/login?return_to={}",
-        latch.config.rp_id,
+        latch.config.hostname,
         url_encode(&return_to),
     );
     Ok(Response::empty(302).with_header(hdr("Location", &location)).boxed())
@@ -204,7 +246,7 @@ fn finish_register(latch: &Latch, body: &str, state: PasskeyRegistration) -> Res
         .map_err(|e| format!("register: {e}"))?;
     let mut creds = latch.creds.lock().unwrap();
     creds.push(pk);
-    state::save_creds(&creds, &latch.config.creds_path).map_err(|e| format!("save: {e}"))
+    state::save_passkeys(&creds, &latch.config.passkeys_path).map_err(|e| format!("save: {e}"))
 }
 
 fn finish_login(latch: &Latch, body: &str, st: PasskeyAuthentication) -> Result<(), String> {
@@ -214,7 +256,7 @@ fn finish_login(latch: &Latch, body: &str, st: PasskeyAuthentication) -> Result<
         .map_err(|e| format!("login: {e}"))?;
     let mut creds = latch.creds.lock().unwrap();
     if creds.iter_mut().any(|c| c.update_credential(&result).is_some()) {
-        let _ = state::save_creds(&creds, &latch.config.creds_path);
+        let _ = state::save_passkeys(&creds, &latch.config.passkeys_path);
     }
     Ok(())
 }
@@ -266,7 +308,7 @@ fn is_api_request(req: &Request) -> bool {
 // headers Caddy sends on a forward_auth subrequest. Hardcode https because
 // cloudflared terminates TLS at the edge and forwards http inside the tunnel.
 fn build_return_to(req: &Request, cfg: &Config) -> String {
-    let host = header_value(req, "X-Forwarded-Host").unwrap_or_else(|| cfg.rp_id.clone());
+    let host = header_value(req, "X-Forwarded-Host").unwrap_or_else(|| cfg.hostname.clone());
     let uri  = header_value(req, "X-Forwarded-Uri").unwrap_or_else(|| "/".into());
     format!("https://{host}{uri}")
 }

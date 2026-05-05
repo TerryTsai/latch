@@ -47,17 +47,30 @@ pub fn default_config_path(mode: Mode) -> PathBuf {
     }
 }
 
-pub fn default_state_dir(mode: Mode) -> PathBuf {
+pub fn default_data_dir(mode: Mode) -> PathBuf {
     match mode {
         Mode::System => PathBuf::from("/var/lib/latch"),
-        Mode::User   => xdg_state_home().join("latch"),
+        Mode::User   => xdg_data_home().join("latch"),
     }
+}
+
+// Where v0.5 used to put data in user mode. Looked up so post-upgrade
+// commands can print a helpful migration hint instead of silently
+// running with no passkeys.
+pub fn legacy_user_data_dir() -> PathBuf {
+    xdg_state_home().join("latch")
 }
 
 pub fn xdg_config_home() -> PathBuf {
     env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| home_dir().join(".config"))
+}
+
+pub fn xdg_data_home() -> PathBuf {
+    env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home_dir().join(".local/share"))
 }
 
 pub fn xdg_state_home() -> PathBuf {
@@ -73,45 +86,45 @@ pub fn home_dir() -> PathBuf {
 // --- config schema ---------------------------------------------------------
 
 // Every field is Option so the same struct represents a parsed TOML file,
-// an env-only layer, or the merged result. Resolve() validates rp_id is
+// an env-only layer, or the merged result. Resolve() validates hostname is
 // present at the end.
 #[derive(Default, Deserialize)]
 pub struct ConfigFile {
-    pub rp_id:         Option<String>,
-    pub rp_origin:     Option<String>,
+    pub hostname:      Option<String>,
+    pub origin:        Option<String>,
     pub cookie_domain: Option<String>,
     pub listen:        Option<String>,
-    pub state_dir:     Option<String>,
+    pub data_dir:      Option<String>,
 }
 
 impl ConfigFile {
     pub fn from_env() -> Self {
         Self {
-            rp_id:         env::var("LATCH_RP_ID").ok(),
-            rp_origin:     env::var("LATCH_RP_ORIGIN").ok(),
+            hostname:      env::var("LATCH_HOSTNAME").ok(),
+            origin:        env::var("LATCH_ORIGIN").ok(),
             cookie_domain: env::var("LATCH_COOKIE_DOMAIN").ok(),
             listen:        env::var("LATCH_LISTEN").ok(),
-            state_dir:     env::var("LATCH_STATE_DIR").ok(),
+            data_dir:      env::var("LATCH_DATA_DIR").ok(),
         }
     }
 
     // Right-hand wins on each field where it's Some.
     pub fn merge(&mut self, other: ConfigFile) {
-        if other.rp_id.is_some()         { self.rp_id         = other.rp_id; }
-        if other.rp_origin.is_some()     { self.rp_origin     = other.rp_origin; }
+        if other.hostname.is_some()      { self.hostname      = other.hostname; }
+        if other.origin.is_some()        { self.origin        = other.origin; }
         if other.cookie_domain.is_some() { self.cookie_domain = other.cookie_domain; }
         if other.listen.is_some()        { self.listen        = other.listen; }
-        if other.state_dir.is_some()     { self.state_dir     = other.state_dir; }
+        if other.data_dir.is_some()      { self.data_dir      = other.data_dir; }
     }
 }
 
 pub struct Config {
-    pub rp_id:         String,
-    pub rp_origin:     String,
+    pub hostname:      String,
+    pub origin:        String,
     pub cookie_domain: String,
     pub listen:        String,
-    pub state_dir:     PathBuf,
-    pub creds_path:    PathBuf,
+    pub data_dir:      PathBuf,
+    pub passkeys_path: PathBuf,
     pub key_path:      PathBuf,
     pub revoked_path:  PathBuf,
     pub source:        ConfigSource,
@@ -123,7 +136,7 @@ pub enum ConfigSource {
 }
 
 impl ConfigSource {
-    fn display(&self) -> String {
+    pub fn display(&self) -> String {
         match self {
             ConfigSource::File(p) => p.display().to_string(),
             ConfigSource::Env     => "(env)".into(),
@@ -133,7 +146,7 @@ impl ConfigSource {
 
 impl Config {
     // Load order: TOML file (if found) ← merged with ← env vars.
-    // If no file is found but LATCH_RP_ID is set, run from env alone.
+    // If no file is found but LATCH_HOSTNAME is set, run from env alone.
     pub fn load(explicit: Option<&Path>) -> Result<Self, String> {
         let env_layer = ConfigFile::from_env();
 
@@ -146,7 +159,7 @@ impl Config {
                 (cf, ConfigSource::File(path))
             }
             Err(e) => {
-                if env_layer.rp_id.is_none() { return Err(e); }
+                if env_layer.hostname.is_none() { return Err(e); }
                 (ConfigFile::default(), ConfigSource::Env)
             }
         };
@@ -156,38 +169,38 @@ impl Config {
     }
 
     pub fn resolve(cf: ConfigFile, source: ConfigSource) -> Result<Self, String> {
-        let rp_id = cf.rp_id
-            .ok_or("rp_id is required (set in config or via LATCH_RP_ID)")?;
-        if rp_id.contains("example.com") {
-            return Err("rp_id still has placeholder; edit your config or env".into());
+        let hostname = cf.hostname
+            .ok_or("hostname is required (set in config or via LATCH_HOSTNAME)")?;
+        if hostname.contains("example.com") {
+            return Err("hostname still has placeholder; edit your config or env".into());
         }
-        let rp_origin = cf.rp_origin.unwrap_or_else(|| format!("https://{rp_id}"));
+        let origin = cf.origin.unwrap_or_else(|| format!("https://{hostname}"));
         let cookie_domain = match cf.cookie_domain {
             Some(d) => d,
-            None    => derive_cookie_domain(&rp_id)?,
+            None    => derive_cookie_domain(&hostname),
         };
         let listen = cf.listen.unwrap_or_else(|| DEFAULT_LISTEN.into());
-        let state_dir = cf.state_dir
+        let data_dir = cf.data_dir
             .map(PathBuf::from)
-            .unwrap_or_else(|| default_state_dir(Mode::detect()));
+            .unwrap_or_else(|| default_data_dir(Mode::detect()));
 
-        let creds_path   = state_dir.join("creds.json");
-        let key_path     = state_dir.join("key");
-        let revoked_path = state_dir.join("revoked.json");
+        let passkeys_path = data_dir.join("passkeys.json");
+        let key_path      = data_dir.join("key");
+        let revoked_path  = data_dir.join("revoked.json");
 
         Ok(Self {
-            rp_id, rp_origin, cookie_domain, listen,
-            state_dir, creds_path, key_path, revoked_path, source,
+            hostname, origin, cookie_domain, listen,
+            data_dir, passkeys_path, key_path, revoked_path, source,
         })
     }
 
     pub fn print(&self) {
         eprintln!("latch {} on {}", env!("CARGO_PKG_VERSION"), self.listen);
         eprintln!("  config        = {}", self.source.display());
-        eprintln!("  rp_id         = {}", self.rp_id);
-        eprintln!("  rp_origin     = {}", self.rp_origin);
+        eprintln!("  hostname      = {}", self.hostname);
+        eprintln!("  origin        = {}", self.origin);
         eprintln!("  cookie_domain = {}", self.cookie_domain);
-        eprintln!("  state_dir     = {}", self.state_dir.display());
+        eprintln!("  data_dir      = {}", self.data_dir.display());
     }
 
     pub fn validate_next(&self, next: &str) -> String {
@@ -223,19 +236,21 @@ pub fn find_config(explicit: Option<&Path>) -> Result<PathBuf, String> {
     if default.exists() { return Ok(default); }
 
     Err(format!(
-        "no config found. Run `latch init` to create {}, or set LATCH_RP_ID in env",
+        "no config found. Run `latch config init` to create {}, or set LATCH_HOSTNAME in env",
         default.display(),
     ))
 }
 
-pub fn derive_cookie_domain(rp_id: &str) -> Result<String, String> {
-    let parts: Vec<&str> = rp_id.split('.').collect();
-    if parts.len() < 2 {
-        return Err(format!(
-            "rp_id `{rp_id}` has no parent domain; set cookie_domain explicitly"
-        ));
+// Default rule: strip the leftmost label so subdomains under the parent
+// can read the session cookie. Apex domains (example.com) and bare
+// hostnames (localhost) scope the cookie to themselves — no subdomain
+// sharing, but no error. We "strip" only when the parent still has a
+// dot, so example.com stays example.com instead of becoming the TLD.
+pub fn derive_cookie_domain(hostname: &str) -> String {
+    match hostname.split_once('.') {
+        Some((_, parent)) if parent.contains('.') => parent.into(),
+        _ => hostname.into(),
     }
-    Ok(parts[1..].join("."))
 }
 
 #[cfg(test)]
@@ -244,12 +259,12 @@ mod tests {
 
     fn cfg() -> Config {
         Config {
-            rp_id:         "latch.example.org".into(),
-            rp_origin:     "https://latch.example.org".into(),
+            hostname:      "latch.example.org".into(),
+            origin:        "https://latch.example.org".into(),
             cookie_domain: "example.org".into(),
             listen:        "127.0.0.1:0".into(),
-            state_dir:     PathBuf::from("/tmp/test-latch"),
-            creds_path:    PathBuf::from("/tmp/test-latch/creds.json"),
+            data_dir:      PathBuf::from("/tmp/test-latch"),
+            passkeys_path: PathBuf::from("/tmp/test-latch/passkeys.json"),
             key_path:      PathBuf::from("/tmp/test-latch/key"),
             revoked_path:  PathBuf::from("/tmp/test-latch/revoked.json"),
             source:        ConfigSource::File(PathBuf::from("/tmp/test-latch/config.toml")),
@@ -257,10 +272,16 @@ mod tests {
     }
 
     #[test]
-    fn derives_cookie_domain() {
-        assert_eq!(derive_cookie_domain("latch.example.com").unwrap(), "example.com");
-        assert_eq!(derive_cookie_domain("auth.foo.bar.dev").unwrap(), "foo.bar.dev");
-        assert!(derive_cookie_domain("apex").is_err());
+    fn derives_cookie_domain_from_subdomain() {
+        assert_eq!(derive_cookie_domain("latch.example.com"), "example.com");
+        assert_eq!(derive_cookie_domain("auth.foo.bar.dev"),  "foo.bar.dev");
+    }
+
+    #[test]
+    fn derives_cookie_domain_for_apex_and_bare() {
+        // Apex and bare hostnames scope the cookie to themselves.
+        assert_eq!(derive_cookie_domain("example.com"), "example.com");
+        assert_eq!(derive_cookie_domain("localhost"),   "localhost");
     }
 
     #[test]
@@ -289,30 +310,35 @@ mod tests {
     fn default_paths_differ_by_mode() {
         assert_eq!(default_config_path(Mode::System), PathBuf::from("/etc/latch/config.toml"));
         assert!(default_config_path(Mode::User).ends_with("latch/config.toml"));
-        assert_eq!(default_state_dir(Mode::System), PathBuf::from("/var/lib/latch"));
-        assert!(default_state_dir(Mode::User).ends_with("latch"));
+        assert_eq!(default_data_dir(Mode::System), PathBuf::from("/var/lib/latch"));
+        // User-mode default lives under XDG_DATA_HOME (~/.local/share/latch).
+        let user_default = default_data_dir(Mode::User);
+        assert!(user_default.ends_with("latch"));
+        let parent = user_default.parent().unwrap().to_string_lossy().to_string();
+        assert!(parent.ends_with(".local/share") || parent.ends_with("share"),
+                "expected XDG_DATA_HOME path, got {parent}");
     }
 
     #[test]
     fn merge_replaces_present_fields_only() {
         let mut a = ConfigFile {
-            rp_id: Some("a.com".into()),
-            listen: Some("127.0.0.1:1".into()),
+            hostname: Some("a.com".into()),
+            listen:   Some("127.0.0.1:1".into()),
             ..Default::default()
         };
         let b = ConfigFile {
-            rp_id: Some("b.com".into()),
-            state_dir: Some("/x".into()),
+            hostname: Some("b.com".into()),
+            data_dir: Some("/x".into()),
             ..Default::default()
         };
         a.merge(b);
-        assert_eq!(a.rp_id.as_deref(), Some("b.com"));
-        assert_eq!(a.listen.as_deref(), Some("127.0.0.1:1"));  // unchanged
-        assert_eq!(a.state_dir.as_deref(), Some("/x"));
+        assert_eq!(a.hostname.as_deref(), Some("b.com"));
+        assert_eq!(a.listen.as_deref(),   Some("127.0.0.1:1"));  // unchanged
+        assert_eq!(a.data_dir.as_deref(), Some("/x"));
     }
 
     #[test]
-    fn resolve_requires_rp_id() {
+    fn resolve_requires_hostname() {
         let cf = ConfigFile::default();
         assert!(Config::resolve(cf, ConfigSource::Env).is_err());
     }
@@ -320,12 +346,24 @@ mod tests {
     #[test]
     fn resolve_synthesizes_from_minimum() {
         let cf = ConfigFile {
-            rp_id: Some("latch.foo.org".into()),
+            hostname: Some("latch.foo.org".into()),
             ..Default::default()
         };
         let c = Config::resolve(cf, ConfigSource::Env).unwrap();
-        assert_eq!(c.rp_origin, "https://latch.foo.org");
+        assert_eq!(c.origin, "https://latch.foo.org");
         assert_eq!(c.cookie_domain, "foo.org");
         assert_eq!(c.listen, DEFAULT_LISTEN);
+    }
+
+    #[test]
+    fn passkeys_path_is_under_data_dir() {
+        let cf = ConfigFile {
+            hostname: Some("latch.foo.org".into()),
+            data_dir: Some("/var/lib/latch".into()),
+            ..Default::default()
+        };
+        let c = Config::resolve(cf, ConfigSource::Env).unwrap();
+        assert_eq!(c.passkeys_path, PathBuf::from("/var/lib/latch/passkeys.json"));
+        assert_eq!(c.key_path,      PathBuf::from("/var/lib/latch/key"));
     }
 }
